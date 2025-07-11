@@ -48,6 +48,7 @@ import string
 
 from impacket import ntlm, uuid, LOG
 from impacket.structure import Structure
+from impacket.mssql.version import MSSQL_VERSION
 
 # We need to have a fake Logger to be compatible with the way Impact 
 # prints information. Outside Impact it's just a print. Inside 
@@ -483,6 +484,7 @@ class MSSQL:
         self.MAX_COL_LEN = 255
         self.lastError = False
         self.tlsSocket = None
+        self.mssql_version = None
         self.__rowsPrinter = rowsPrinter
 
     # With Kerberos we need to know to which MSSQL instance we are going to connect (to compute the SPN)
@@ -530,19 +532,24 @@ class MSSQL:
         # First we initiate the structure
         prelogin = TDS_PRELOGIN()
         # Then we fill the version of the MSSQL client we use
-        prelogin['Version'] = b"\x08\x00\x01\x55\x00\x00"
+        prelogin["Version"] = b"\x08\x00\x01\x55\x00\x00"
         # We specify we support encryption but don't want it
-        prelogin['Encryption'] = TDS_ENCRYPT_OFF
+        prelogin["Encryption"] = TDS_ENCRYPT_OFF
         # Random threadID because we don't care about this
-        prelogin['ThreadID'] = struct.pack('<L',random.randint(0,65535))
+        prelogin["ThreadID"] = struct.pack("<L",random.randint(0,65535))
         # The instance name
-        prelogin['Instance'] = b'MSSQLServer\x00'
-        # We send the prelogin packet, receive the response from the server
+        prelogin["Instance"] = b"MSSQLServer\x00"
+        # We send the prelogin packet
         self.sendTDS(TDS_PRE_LOGIN, prelogin.getData(), 0)
+        # Now we receive the TDS prelogin packet from the server
         tds = self.recvTDS()
-        # And return the result to the Login or KerberosLogin functions for futher parsing
-        return TDS_PRELOGIN(tds['Data'])
-    
+        # Parse its data
+        response = TDS_PRELOGIN(tds["Data"])
+        # And extract its version from the Version field
+        self.mssql_version = MSSQL_VERSION(response["Version"])
+        # Finally we return the result to the Login or KerberosLogin functions for futher parsing
+        return TDS_PRELOGIN(tds["Data"])
+        
     def encryptPassword(self, password ):
         return bytes(bytearray([((x & 0x0f) << 4) + ((x & 0xf0) >> 4) ^ 0xa5 for x in bytearray(password)]))
 
@@ -579,26 +586,26 @@ class MSSQL:
         if (len(data)-8) > self.packetSize:
             remaining = data[self.packetSize-8:]
             tds = TDSPacket()
-            tds['Type'] = packetType
-            tds['Status'] = TDS_STATUS_NORMAL
-            tds['PacketID'] = packetID
-            tds['Data'] = data[:self.packetSize-8]
+            tds["Type"] = packetType
+            tds["Status"] = TDS_STATUS_NORMAL
+            tds["PacketID"] = packetID
+            tds["Data"] = data[:self.packetSize-8]
             self.socketSendall(tds.getData())
 
             while len(remaining) > (self.packetSize-8):
                 packetID += 1
-                tds['PacketID'] = packetID
-                tds['Data'] = remaining[:self.packetSize-8]
+                tds["PacketID"] = packetID
+                tds["Data"] = remaining[:self.packetSize-8]
                 self.socketSendall(tds.getData())
                 remaining = remaining[self.packetSize-8:]
             data = remaining
             packetID+=1
 
         tds = TDSPacket()
-        tds['Type'] = packetType
-        tds['Status'] = TDS_STATUS_EOM
-        tds['PacketID'] = packetID
-        tds['Data'] = data
+        tds["Type"] = packetType
+        tds["Status"] = TDS_STATUS_EOM
+        tds["PacketID"] = packetID
+        tds["Data"] = data
         self.socketSendall(tds.getData())
 
     # This function is a wrapper that is used to dispatch packets to send depending of the TLS context
@@ -645,22 +652,22 @@ class MSSQL:
         if packetSize is None:
             packetSize = self.packetSize
 
-        data = b''
-        while data == b'':
+        data = b""
+        while data == b"":
             data = self.socketRecv(packetSize)
         
         packet = TDSPacket(data)
                 
-        status = packet['Status']
-        packetLen = packet['Length']-8
-        while packetLen > len(packet['Data']):
+        status = packet["Status"]
+        packetLen = packet["Length"]-8
+        while packetLen > len(packet["Data"]):
             data = self.socketRecv(packetSize)
-            packet['Data'] += data
+            packet["Data"] += data
         
         remaining = None
-        if packetLen <  len(packet['Data']):
-            remaining = packet['Data'][packetLen:]
-            packet['Data'] = packet['Data'][:packetLen]
+        if packetLen <  len(packet["Data"]):
+            remaining = packet["Data"][packetLen:]
+            packet["Data"] = packet["Data"][:packetLen]
 
         while status != TDS_STATUS_EOM:
             if remaining is not None:
@@ -668,19 +675,19 @@ class MSSQL:
             else:
                 tmpPacket = TDSPacket(self.socketRecv(packetSize))
 
-            packetLen = tmpPacket['Length'] - 8
-            while packetLen > len(tmpPacket['Data']):
+            packetLen = tmpPacket["Length"] - 8
+            while packetLen > len(tmpPacket["Data"]):
                 data = self.socketRecv(packetSize)
-                tmpPacket['Data'] += data
+                tmpPacket["Data"] += data
 
             remaining = None
-            if packetLen <  len(tmpPacket['Data']):
-                remaining = tmpPacket['Data'][packetLen:]
-                tmpPacket['Data'] = tmpPacket['Data'][:packetLen]
+            if packetLen <  len(tmpPacket["Data"]):
+                remaining = tmpPacket["Data"][packetLen:]
+                tmpPacket["Data"] = tmpPacket["Data"][:packetLen]
 
-            status = tmpPacket['Status']
-            packet['Data'] += tmpPacket['Data']
-            packet['Length'] += tmpPacket['Length'] - 8
+            status = tmpPacket["Status"]
+            packet["Data"] += tmpPacket["Data"]
+            packet["Length"] += tmpPacket["Length"] - 8
             
         return packet
 
@@ -690,32 +697,26 @@ class MSSQL:
             return self.socket.recv(bufsize)
         else:
             return self.tls_recv(bufsize)
-
+        
     # If the socket is tlsSocket (means we have a TLS context) then we need to read the date from it
     # And apss it to the TLS context via the self.in_bio object which is going to decrypt it
     def tls_recv(self, bufsize):
-        while True:
-            try:
-                # Try to read decrypted data first
-                decrypted = self.tlsSocket.read(bufsize)
-                if decrypted:
-                    return decrypted
-            except ssl.SSLWantReadError:
-                pass  # Means we need more encrypted bytes
+        encrypted = self.socket.recv(4096)
+        if not encrypted:
+            return b""
 
-            # Read more encrypted bytes from the socket
-            encrypted = self.socket.recv(bufsize)
-            if not encrypted:
-                # Remote closed the connection
-                return b""
-
-            self.in_bio.write(encrypted)
+        self.in_bio.write(encrypted)
+        try:
+            decrypted = self.tlsSocket.read(bufsize)
+        except ssl.SSLWantReadError:
+            return b""
+        return decrypted
 
     #################### READ DATA #####################################################################
     
 
     # This function returns the computed Channel Binding Token based on the tls-unique value
-    def generate_cbt_from_tls_unique(self):
+    def generate_cbt_from_tls_unique(self) -> bytes:
         channel_binding_struct = b""
         initiator_address = b"\x00" * 8
         acceptor_address = b"\x00" * 8
@@ -793,7 +794,7 @@ class MSSQL:
         resp = self.preLogin()
         # If the MSSQL Server responds with a TDS_ENCRYPT_REQ or TDS_ENCRYPT_OFF 
         # Then it means we need to setup a TLS context
-        if resp['Encryption'] == TDS_ENCRYPT_REQ or resp['Encryption'] == TDS_ENCRYPT_OFF:
+        if resp["Encryption"] == TDS_ENCRYPT_REQ or resp["Encryption"] == TDS_ENCRYPT_OFF:
             self.set_tls_context()
 
         # That part is used to compute the Version field for the NTLM_NEGOTIATE and NTLM_AUTHENTICATE messages
@@ -820,7 +821,7 @@ class MSSQL:
         from impacket.krb5.types import Principal, KerberosTime, Ticket
         from pyasn1.codec.der import decoder, encoder
         from pyasn1.type.univ import noValue
-        from impacket.krb5.gssapi import CheckSumField, GSS_C_REPLAY_FLAG, GSS_C_SEQUENCE_FLAG
+        from impacket.krb5.gssapi import GSS_C_REPLAY_FLAG, GSS_C_SEQUENCE_FLAG
 
         if useCache:
             domain, username, TGT, TGS = CCache.parseFile(domain, username, 'MSSQLSvc/%s:%d' % (self.remoteName, self.port))
@@ -834,7 +835,7 @@ class MSSQL:
                     try:
                         if int(i['tcp']) == self.port:
                             instanceName = i['InstanceName']
-                    except Exception as e:
+                    except Exception:
                         pass
 
                 if instanceName:
@@ -919,21 +920,21 @@ class MSSQL:
 
         # Now let's build the AP_REQ
         apReq = AP_REQ()
-        apReq['pvno'] = 5
-        apReq['msg-type'] = int(constants.ApplicationTagNumbers.AP_REQ.value)
+        apReq["pvno"] = 5
+        apReq["msg-type"] = int(constants.ApplicationTagNumbers.AP_REQ.value)
 
         opts = list()
-        apReq['ap-options'] = constants.encodeFlags(opts)
-        seq_set(apReq, 'ticket', ticket.to_asn1)
+        apReq["ap-options"] = constants.encodeFlags(opts)
+        seq_set(apReq, "ticket", ticket.to_asn1)
 
         authenticator = Authenticator()
-        authenticator['authenticator-vno'] = 5
-        authenticator['crealm'] = domain
-        seq_set(authenticator, 'cname', userName.components_to_asn1)
+        authenticator["authenticator-vno"] = 5
+        authenticator["crealm"] = domain
+        seq_set(authenticator, "cname", userName.components_to_asn1)
         now = datetime.datetime.now(datetime.timezone.utc)
 
-        authenticator['cusec'] = now.microsecond
-        authenticator['ctime'] = KerberosTime.to_asn1(now)
+        authenticator["cusec"] = now.microsecond
+        authenticator["ctime"] = KerberosTime.to_asn1(now)
         authenticator["cksum"] = noValue
         authenticator["cksum"]["cksumtype"] = 0x8003
         
@@ -953,38 +954,38 @@ class MSSQL:
         # (Section 5.5.1)
         encryptedEncodedAuthenticator = cipher.encrypt(sessionKey, 11, encodedAuthenticator, None)
 
-        apReq['authenticator'] = noValue
-        apReq['authenticator']['etype'] = cipher.enctype
-        apReq['authenticator']['cipher'] = encryptedEncodedAuthenticator
+        apReq["authenticator"] = noValue
+        apReq["authenticator"]["etype"] = cipher.enctype
+        apReq["authenticator"]["cipher"] = encryptedEncodedAuthenticator
 
-        blob['MechToken'] = encoder.encode(apReq)
+        blob["MechToken"] = encoder.encode(apReq)
 
         # Seeting the last options for our TDS packet
         # TDS_INTEGRATED_SECURITY_ON enables Windows authentication
-        login['OptionFlags2'] |= TDS_INTEGRATED_SECURITY_ON
+        login["OptionFlags2"] |= TDS_INTEGRATED_SECURITY_ON
         # Include the entire blog's data into the login packet in the SSPI field
-        login['SSPI'] = blob.getData()
+        login["SSPI"] = blob.getData()
         # Sets the length of the packet
-        login['Length'] = len(login.getData())
+        login["Length"] = len(login.getData())
 
         # Send login packet which is containing the Kerberos tickets
         self.sendTDS(TDS_LOGIN7, login.getData())
 
         # According to the specs, if encryption is not required, we must encrypt just
         # the first Login packet :-o
-        if resp['Encryption'] == TDS_ENCRYPT_OFF:
+        if resp["Encryption"] == TDS_ENCRYPT_OFF:
             self.tlsSocket = None
 
         # We then receive the TDS response from the server and parse its response to see if we are logged in or not
         tds = self.recvTDS()
-        self.replies = self.parseReply(tds['Data'])
+        self.replies = self.parseReply(tds["Data"])
         if TDS_LOGINACK_TOKEN in self.replies:
             return True
         else:
             return False
 
     def login(self, database, username, password='', domain='', hashes = None, useWindowsAuth = False):
-
+        
         if hashes is not None:
             lmhash, nthash = hashes.split(':')
             lmhash = binascii.a2b_hex(lmhash)
@@ -998,7 +999,7 @@ class MSSQL:
 
         # If the MSSQL Server responds with a TDS_ENCRYPT_REQ or TDS_ENCRYPT_OFF 
         # Then it means we need to setup a TLS context
-        if resp['Encryption'] == TDS_ENCRYPT_REQ or resp['Encryption'] == TDS_ENCRYPT_OFF:
+        if resp["Encryption"] == TDS_ENCRYPT_REQ or resp["Encryption"] == TDS_ENCRYPT_OFF:
             self.set_tls_context()
 
         # That part is used to compute the Version field for the NTLM_NEGOTIATE and NTLM_AUTHENTICATE messages
@@ -1186,7 +1187,7 @@ class MSSQL:
                     info_logger("INFO(%s): Line %d: %s" % (key['ServerName'].decode('utf-16le'), key['LineNumber'], key['MsgText'].decode('utf-16le')))
 
                 elif key['TokenType'] == TDS_LOGINACK_TOKEN:
-                    info_logger("ACK: Result: %s - %s (%d%d %d%d) " % (key['Interface'], key['ProgName'].decode('utf-16le'), key['MajorVer'], key['MinorVer'], key['BuildNumHi'], key['BuildNumLow']))
+                    info_logger(f"ACK: Result: {key['Interface']} - {self.mssql_version}")
 
                 elif key['TokenType'] == TDS_ENVCHANGE_TOKEN:
                     if key['Type'] in (TDS_ENVCHANGE_DATABASE, TDS_ENVCHANGE_LANGUAGE, TDS_ENVCHANGE_CHARSET, TDS_ENVCHANGE_PACKETSIZE):
@@ -1707,3 +1708,4 @@ class MSSQL:
         if self.lastError:
             raise self.lastError
         return True
+    
